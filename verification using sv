@@ -1,0 +1,325 @@
+// Code your testbench here
+// or browse Examples
+
+interface uart_if;
+  logic clk;
+  logic uclktx;
+  logic uclkrx;
+  logic rst;
+  logic rx;
+  logic [7:0] dintx;
+  logic send;
+  logic tx;
+  logic [7:0] doutrx;
+  logic donetx;
+  logic donerx;
+  
+endinterface
+
+////////////////////////////////////////////////
+
+class transaction;
+  
+  typedef enum bit [1:0] { write = 2'b00, read = 2'b01} oper_type;
+  randc oper_type oper;
+  bit rx;
+  randc bit [7:0] dintx;
+  bit send;
+  bit tx;
+  bit [7:0] doutrx;
+  bit donetx;
+  bit donerx;
+  
+  function void display(string tag);
+    $display("[%0s] The value in this phase: type: %b, rx: %0d, dintx: %0d, send : %0d, tx : %0d , doutrx : %0d, donetx : %0d, donerx : %0d", tag, oper, rx, dintx, send, tx, doutrx, donetx, donerx);
+  endfunction 
+  
+  function transaction copy();
+    copy = new();
+    copy.oper = oper;
+    copy.rx = rx;
+    copy.dintx = dintx;
+    copy.send = send;
+    copy.tx = tx;
+    copy.doutrx = doutrx;
+    copy.donetx = donetx;
+    copy.donerx = donerx;
+  endfunction
+    
+  
+endclass
+
+/////////////////////////////////////////////////////////////////////////
+
+class generator;
+  
+  transaction trans;
+  
+  mailbox #(transaction) mbxDrive;
+  
+  int number_gen = 0;
+ 
+   event nextDrv;
+ //event nextScore;
+  event done;
+  
+  function new(mailbox #(transaction) mbxDrive);
+    this.mbxDrive = mbxDrive;
+  endfunction 
+  
+  task run();
+    trans = new();
+    for (int i = 0 ; i < number_gen; i++) begin 
+      if (trans.randomize()) begin 
+        $display("[GEN] RANDOM SUCCESSED");
+        trans.display("GEN");
+        mbxDrive.put(trans.copy);
+      end 
+      else begin 
+        $error("Random is failure");
+      end
+      @(nextDrv);
+    end
+    ->done;
+  endtask
+  
+endclass
+
+//////////////////////////////////////////////////////////////////////
+
+class driver;
+  
+  virtual uart_if vif;
+  
+  transaction trans;
+  
+  mailbox #(bit [7:0]) mbxScore;
+  mailbox #(transaction) mbxDrive;
+  
+  bit [7:0] datarx;
+  
+
+  function new(mailbox #(transaction) mbxDrive, mailbox #(bit [7:0]) mbxScore);
+    this.mbxDrive = mbxDrive;
+    this.mbxScore = mbxScore;
+  endfunction 
+  
+  task reset();
+    vif.rst <= 1'b1;
+    vif.dintx <= 0;
+    vif.send <= 0;
+    vif.rx <= 1'b1;
+    repeat(5) @(posedge vif.uclktx);
+    vif.rst <= 1'b0;
+    @(posedge vif.uclktx);
+    $display("[DRV] : RESET");
+  endtask
+  
+  task run();
+    
+    trans = new();
+    
+    forever begin 
+      mbxDrive.get(trans);
+      if(trans.oper == 2'b00) //tranmission
+        begin 
+          @(posedge vif.uclktx);
+          vif.rst <= 1'b0;
+          vif.send <=  1'b1;
+          vif.dintx <= trans.dintx;
+          vif.rx <= 1'b1;
+          @(posedge vif.uclktx);
+          mbxScore.put(trans.dintx);
+          $display("[DRV] data Sent : %0d", trans.dintx);
+          wait(vif.donetx == 1'b1);
+          vif.send <= 1'b0;
+        end
+      else if (trans.oper == 2'b01) begin 
+        @(posedge vif.uclktx);
+        vif.rst <= 1'b0;
+        vif.rx <= 1'b0;
+        vif.send <= 1'b0;
+        @(posedge vif.uclkrx);
+        for (int i = 0 ; i <= 7 ; i++) begin 
+          @(posedge vif.uclkrx);
+          vif.rx <= $urandom;
+          datarx[i] = vif.rx;
+        end
+        
+        mbxScore.put(datarx);
+        
+        $display("[DRV] : Data RCVD: %0d", datarx);
+        wait(vif.donerx == 1'b1);
+        vif.rx <= 1'b1;
+      end
+      
+    end
+  endtask
+endclass
+
+
+///////////////////////////////////////////////////////////////////////////
+
+
+class monitor;
+  
+  transaction trans;
+  
+  mailbox #(bit [7:0]) mbxScoreDut;
+ 
+  virtual uart_if vif;
+  
+  function new(mailbox #(bit [7:0]) mbxScoreDut);
+    this.mbxScoreDut = mbxScoreDut;
+  endfunction 
+  
+  
+  bit [7:0] dataTx;
+  bit [7:0] dataRx;
+  
+  task run();
+    trans = new();
+    
+    forever begin 
+      @(posedge vif.uclktx);
+      if((vif.send == 1'b1) && (vif.rx == 1'b1)) begin 
+        @(posedge vif.uclktx);
+        for (int i = 0 ; i <= 7 ; i++) begin           
+          @(posedge vif.uclktx);
+           dataTx[i] = vif.tx;
+        end
+        @(posedge vif.uclktx);
+        $display("[MON} The transfer received : %0d", dataTx);
+        mbxScoreDut.put(dataTx);
+      end
+      else  if((vif.rx == 1'b0) && (vif.send == 1'b0) ) 
+         begin
+         	wait(vif.donerx == 1);
+           dataRx = vif.doutrx;     
+           $display("[MON] : DATA RCVD RX %0d", dataRx);
+           @(posedge vif.uclktx); 
+           mbxScoreDut.put(dataRx);
+      	end
+    end
+  endtask
+endclass
+
+///////////////////////////////////////////////////////////////////////////
+
+class scoreboard;
+  
+  mailbox #(bit [7:0]) mbxScoreDut;
+  mailbox #(bit [7:0]) mbxScore;
+  
+  bit [7:0] dataDut, dataTrans;
+  
+  event nextDrv;
+  
+  function new(mailbox #(bit [7:0]) mbxScoreDut, mailbox #(bit [7:0]) mbxScore);
+    this.mbxScoreDut = mbxScoreDut;
+    this.mbxScore = mbxScore;
+  endfunction 
+  
+  task run();
+    forever begin 
+      mbxScore.get(dataTrans);
+      mbxScoreDut.get(dataDut);
+
+      if(dataTrans == dataDut) begin
+        $display("[SCORE] PASS");
+      end
+      else begin 
+        $display("[SCORE] ERROR");
+      end
+      $display("==================================================");
+      ->nextDrv;
+    end
+  endtask
+endclass
+
+///////////////////////////////////////////////////////////////////////
+
+module tb();
+  
+  mailbox #(transaction) mbxDrive;
+  mailbox #(bit [7:0]) mbxScore;
+  
+  mailbox #(bit [7:0]) mbxScoreDut; 
+  
+  generator gen;
+  driver drv;
+  monitor mon;
+  scoreboard score;
+  
+  event done;
+  
+  uart_if uartTop();
+  
+  uart_top uartTB(
+    .clk(uartTop.clk),
+    .rst(uartTop.rst),
+    .rx(uartTop.rx),
+    .dintx(uartTop.dintx),
+    .send(uartTop.send),
+    .tx(uartTop.tx),
+    .doutrx(uartTop.doutrx),
+    .donetx(uartTop.donetx),
+    .donerx(uartTop.donerx));
+  
+  assign uartTop.uclktx = uartTB.utx.uclk;
+  assign uartTop.uclkrx = uartTB.rtx.uclk;
+  
+  initial begin
+    
+    mbxDrive =  new();
+    mbxScore = new();
+    mbxScoreDut = new();
+    
+    gen = new(mbxDrive);
+    drv = new(mbxDrive, mbxScore);
+    mon = new(mbxScoreDut);
+    score = new(mbxScoreDut, mbxScore);
+    
+    drv.vif = uartTop;
+    mon.vif = uartTop;
+ 
+    gen.number_gen = 10;
+    
+    gen.nextDrv = score.nextDrv;
+    
+    gen.done = done;
+    
+  end
+  
+  initial begin 
+    uartTop.clk = 1'b1;
+  end
+  
+  always #10 uartTop.clk = ~uartTop.clk;
+  
+  initial begin
+    drv.reset();
+    
+    fork 
+      gen.run();
+      drv.run();
+      mon.run();
+      score.run();
+    join_none
+    @(done);
+    $finish();
+  end
+  
+   initial begin
+      $dumpfile("dump.vcd");
+      $dumpvars;
+    end
+endmodule
+
+         
+  
+  
+
+    
+    
+
